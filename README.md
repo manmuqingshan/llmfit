@@ -4,6 +4,15 @@ A terminal tool that right-sizes LLM models to your system's RAM, CPU, and GPU. 
 
 Ships with an interactive TUI (default) and a classic CLI mode.
 
+### Quick install
+
+```sh
+curl -fsSL https://llmfit.axjns.dev/install.sh | sh
+```
+
+Downloads the latest release binary from GitHub and installs it to `/usr/local/bin` (or `~/.local/bin`).
+
+
 ![demo](demo.gif)
 
 Example of a medium performance home laptop
@@ -14,16 +23,6 @@ Example of a medium performance home laptop
 
 ## Install
 
-### Quick install
-
-```sh
-curl -fsSL https://llmfit.axjns.dev/install.sh | sh
-```
-
-Downloads the latest release binary from GitHub and installs it to `/usr/local/bin` (or `~/.local/bin`).
-
-```sh
-```
 
 ### From source
 

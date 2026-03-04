@@ -42,6 +42,8 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
 
     if app.show_plan {
         draw_plan(frame, app, outer[2], &tc);
+    } else if app.show_compare {
+        draw_compare(frame, app, outer[2], &tc);
     } else if app.show_detail {
         draw_detail(frame, app, outer[2], &tc);
     } else {
@@ -554,8 +556,14 @@ fn draw_table(frame: &mut Frame, app: &mut App, area: Rect, tc: &ThemeColors) {
                 Style::default()
             };
 
+            let marker = if app.compare_mark_model.as_deref() == Some(fit.model.name.as_str()) {
+                "*"
+            } else {
+                fit_indicator(fit.fit_level)
+            };
+
             Row::new(vec![
-                Cell::from(fit_indicator(fit.fit_level)).style(Style::default().fg(color)),
+                Cell::from(marker).style(Style::default().fg(color)),
                 Cell::from(installed_icon).style(Style::default().fg(installed_color)),
                 Cell::from(fit.model.name.clone()).style(Style::default().fg(tc.fg)),
                 Cell::from(fit.model.provider.clone()).style(Style::default().fg(tc.muted)),
@@ -642,6 +650,221 @@ fn draw_table(frame: &mut Frame, app: &mut App, area: Rect, tc: &ThemeColors) {
             &mut scrollbar_state,
         );
     }
+}
+
+fn draw_compare(frame: &mut Frame, app: &App, area: Rect, tc: &ThemeColors) {
+    let Some((left, right)) = app.selected_compare_pair() else {
+        let block = Block::default()
+            .borders(Borders::ALL)
+            .border_style(Style::default().fg(tc.border))
+            .title(" Compare ")
+            .title_style(Style::default().fg(tc.title).add_modifier(Modifier::BOLD));
+        let body = Paragraph::new(vec![
+            Line::from(""),
+            Line::from(Span::styled(
+                "  Compare requires two different models.",
+                Style::default().fg(tc.warning),
+            )),
+            Line::from(""),
+            Line::from(Span::styled(
+                "  1) Move to a model and press m (mark).",
+                Style::default().fg(tc.muted),
+            )),
+            Line::from(Span::styled(
+                "  2) Move to another model and press c (compare).",
+                Style::default().fg(tc.muted),
+            )),
+            Line::from(Span::styled(
+                "  3) Press c again to return.",
+                Style::default().fg(tc.muted),
+            )),
+        ])
+        .block(block);
+        frame.render_widget(body, area);
+        return;
+    };
+
+    let sections = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Length(3), Constraint::Min(10)])
+        .split(area);
+    let cols = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
+        .split(sections[1]);
+
+    let title = Paragraph::new(Line::from(vec![
+        Span::styled(" Compare ", Style::default().fg(tc.accent).bold()),
+        Span::styled(
+            format!("{}  vs  {}", left.model.name, right.model.name),
+            Style::default().fg(tc.fg),
+        ),
+    ]))
+    .block(
+        Block::default()
+            .borders(Borders::ALL)
+            .border_style(Style::default().fg(tc.border)),
+    );
+    frame.render_widget(title, sections[0]);
+
+    let left_lines = vec![
+        Line::from(""),
+        Line::from(vec![
+            Span::styled("  Model: ", Style::default().fg(tc.muted)),
+            Span::styled(&left.model.name, Style::default().fg(tc.fg).bold()),
+        ]),
+        Line::from(vec![
+            Span::styled("  Score: ", Style::default().fg(tc.muted)),
+            Span::styled(
+                format!("{:.1}", left.score),
+                Style::default().fg(tc.score_high),
+            ),
+        ]),
+        Line::from(vec![
+            Span::styled("  Fit:   ", Style::default().fg(tc.muted)),
+            Span::styled(
+                format!("{} {}", fit_indicator(left.fit_level), left.fit_text()),
+                Style::default().fg(fit_color(left.fit_level, tc)),
+            ),
+        ]),
+        Line::from(vec![
+            Span::styled("  tok/s: ", Style::default().fg(tc.muted)),
+            Span::styled(
+                format!("{:.1}", left.estimated_tps),
+                Style::default().fg(tc.fg),
+            ),
+        ]),
+        Line::from(vec![
+            Span::styled("  Mem%:  ", Style::default().fg(tc.muted)),
+            Span::styled(
+                format!("{:.1}%", left.utilization_pct),
+                Style::default().fg(fit_color(left.fit_level, tc)),
+            ),
+        ]),
+        Line::from(vec![
+            Span::styled("  Runtime:", Style::default().fg(tc.muted)),
+            Span::styled(
+                format!(" {}", left.runtime_text()),
+                Style::default().fg(tc.fg),
+            ),
+        ]),
+        Line::from(vec![
+            Span::styled("  Mode:   ", Style::default().fg(tc.muted)),
+            Span::styled(left.run_mode_text(), Style::default().fg(tc.fg)),
+        ]),
+        Line::from(vec![
+            Span::styled("  Params: ", Style::default().fg(tc.muted)),
+            Span::styled(&left.model.parameter_count, Style::default().fg(tc.fg)),
+        ]),
+        Line::from(vec![
+            Span::styled("  Context:", Style::default().fg(tc.muted)),
+            Span::styled(
+                format!(" {} tokens", left.model.context_length),
+                Style::default().fg(tc.fg),
+            ),
+        ]),
+        Line::from(vec![
+            Span::styled("  Quant:  ", Style::default().fg(tc.muted)),
+            Span::styled(&left.best_quant, Style::default().fg(tc.good)),
+        ]),
+    ];
+    frame.render_widget(
+        Paragraph::new(left_lines).block(
+            Block::default()
+                .borders(Borders::ALL)
+                .border_style(Style::default().fg(tc.border))
+                .title(" Marked (baseline) ")
+                .title_style(Style::default().fg(tc.accent_secondary)),
+        ),
+        cols[0],
+    );
+
+    let score_delta = right.score - left.score;
+    let tps_delta = right.estimated_tps - left.estimated_tps;
+    let mem_delta = right.utilization_pct - left.utilization_pct;
+    let right_lines = vec![
+        Line::from(""),
+        Line::from(vec![
+            Span::styled("  Model: ", Style::default().fg(tc.muted)),
+            Span::styled(&right.model.name, Style::default().fg(tc.fg).bold()),
+        ]),
+        Line::from(vec![
+            Span::styled("  Score: ", Style::default().fg(tc.muted)),
+            Span::styled(
+                format!("{:.1} ({:+.1})", right.score, score_delta),
+                Style::default().fg(if score_delta >= 0.0 {
+                    tc.good
+                } else {
+                    tc.warning
+                }),
+            ),
+        ]),
+        Line::from(vec![
+            Span::styled("  Fit:   ", Style::default().fg(tc.muted)),
+            Span::styled(
+                format!("{} {}", fit_indicator(right.fit_level), right.fit_text()),
+                Style::default().fg(fit_color(right.fit_level, tc)),
+            ),
+        ]),
+        Line::from(vec![
+            Span::styled("  tok/s: ", Style::default().fg(tc.muted)),
+            Span::styled(
+                format!("{:.1} ({:+.1})", right.estimated_tps, tps_delta),
+                Style::default().fg(if tps_delta >= 0.0 {
+                    tc.good
+                } else {
+                    tc.warning
+                }),
+            ),
+        ]),
+        Line::from(vec![
+            Span::styled("  Mem%:  ", Style::default().fg(tc.muted)),
+            Span::styled(
+                format!("{:.1}% ({:+.1}%)", right.utilization_pct, mem_delta),
+                Style::default().fg(if mem_delta <= 0.0 {
+                    tc.good
+                } else {
+                    tc.warning
+                }),
+            ),
+        ]),
+        Line::from(vec![
+            Span::styled("  Runtime:", Style::default().fg(tc.muted)),
+            Span::styled(
+                format!(" {}", right.runtime_text()),
+                Style::default().fg(tc.fg),
+            ),
+        ]),
+        Line::from(vec![
+            Span::styled("  Mode:   ", Style::default().fg(tc.muted)),
+            Span::styled(right.run_mode_text(), Style::default().fg(tc.fg)),
+        ]),
+        Line::from(vec![
+            Span::styled("  Params: ", Style::default().fg(tc.muted)),
+            Span::styled(&right.model.parameter_count, Style::default().fg(tc.fg)),
+        ]),
+        Line::from(vec![
+            Span::styled("  Context:", Style::default().fg(tc.muted)),
+            Span::styled(
+                format!(" {} tokens", right.model.context_length),
+                Style::default().fg(tc.fg),
+            ),
+        ]),
+        Line::from(vec![
+            Span::styled("  Quant:  ", Style::default().fg(tc.muted)),
+            Span::styled(&right.best_quant, Style::default().fg(tc.good)),
+        ]),
+    ];
+    frame.render_widget(
+        Paragraph::new(right_lines).block(
+            Block::default()
+                .borders(Borders::ALL)
+                .border_style(Style::default().fg(tc.border))
+                .title(" Selected (delta vs baseline) ")
+                .title_style(Style::default().fg(tc.accent_secondary)),
+        ),
+        cols[1],
+    );
 }
 
 fn draw_detail(frame: &mut Frame, app: &App, area: Rect, tc: &ThemeColors) {
@@ -1633,7 +1856,7 @@ fn draw_status_bar(frame: &mut Frame, app: &App, area: Rect, tc: &ThemeColors) {
                 };
                 (
                     format!(
-                        " ↑↓/jk:nav  {}  /:search  f:fit  s:sort  t:theme  p:plan{}  P:providers  U:use cases  C:caps  q:quit  tok/s*:est",
+                        " ↑↓/jk:nav  {}  /:search  f:fit  s:sort  t:theme  p:plan  m:mark  c:compare  x:clear mark{}  P:providers  U:use cases  C:caps  q:quit  tok/s*:est",
                         detail_key, ollama_keys,
                     ),
                     "NORMAL",
@@ -1718,7 +1941,7 @@ fn draw_status_bar(frame: &mut Frame, app: &App, area: Rect, tc: &ThemeColors) {
             };
             (
                 format!(
-                    " ↑↓/jk:nav  {}  /:search  f:fit  s:sort  t:theme  p:plan{}  P:providers  U:use cases  C:caps  q:quit  tok/s*:est",
+                    " ↑↓/jk:nav  {}  /:search  f:fit  s:sort  t:theme  p:plan  m:mark  c:compare  x:clear mark{}  P:providers  U:use cases  C:caps  q:quit  tok/s*:est",
                     detail_key, ollama_keys,
                 ),
                 "NORMAL",

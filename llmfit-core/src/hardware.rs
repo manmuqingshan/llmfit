@@ -76,11 +76,7 @@ impl SystemSpecs {
         };
 
         let total_cpu_cores = sys.cpus().len();
-        let cpu_name = sys
-            .cpus()
-            .first()
-            .map(|cpu| cpu.brand().to_string())
-            .unwrap_or_else(|| "Unknown CPU".to_string());
+        let cpu_name = Self::detect_cpu_name(&sys);
 
         let gpus = Self::detect_all_gpus(total_ram_gb, &cpu_name);
 
@@ -231,6 +227,16 @@ impl SystemSpecs {
         let ascend = Self::detect_ascend_npus();
         if !ascend.is_empty() {
             gpus.extend(ascend);
+        }
+
+        // Vulkan fallback (e.g. Android/Termux with Turnip)
+        for vulkan_gpu in Self::detect_vulkan_gpu_info() {
+            let dominated = gpus
+                .iter()
+                .any(|existing| Self::is_same_gpu_name(&existing.name, &vulkan_gpu.name));
+            if !dominated {
+                gpus.push(vulkan_gpu);
+            }
         }
 
         // Sort by VRAM descending so the best GPU is primary
@@ -1023,6 +1029,135 @@ impl SystemSpecs {
         }
     }
 
+    fn has_command(command: &str) -> bool {
+        let Some(path_var) = std::env::var_os("PATH") else {
+            return false;
+        };
+
+        for path in std::env::split_paths(&path_var) {
+            let candidate = path.join(command);
+            if candidate.is_file() {
+                return true;
+            }
+
+            #[cfg(target_os = "windows")]
+            for ext in [".exe", ".cmd", ".bat", ".com"] {
+                let candidate = path.join(format!("{command}{ext}"));
+                if candidate.is_file() {
+                    return true;
+                }
+            }
+        }
+
+        false
+    }
+
+    /// Detect GPUs via Vulkan. This is especially useful on Android/Termux,
+    /// where vendor-specific Linux utilities may be unavailable.
+    fn detect_vulkan_gpu_info() -> Vec<GpuInfo> {
+        if !Self::has_command("vulkaninfo") {
+            return Vec::new();
+        }
+
+        let output = match std::process::Command::new("vulkaninfo")
+            .arg("--summary")
+            .output()
+        {
+            Ok(o) if o.status.success() => o,
+            _ => match std::process::Command::new("vulkaninfo").output() {
+                Ok(o) if o.status.success() => o,
+                _ => return Vec::new(),
+            },
+        };
+
+        let text = String::from_utf8_lossy(&output.stdout);
+        let mut grouped: BTreeMap<String, u32> = BTreeMap::new();
+
+        for name in Self::parse_vulkan_device_names(&text) {
+            if Self::is_software_vulkan_device(&name) {
+                continue;
+            }
+            *grouped.entry(name).or_insert(0) += 1;
+        }
+
+        grouped
+            .into_iter()
+            .map(|(name, count)| GpuInfo {
+                backend: GpuBackend::Vulkan,
+                count,
+                name,
+                unified_memory: false,
+                vram_gb: None,
+            })
+            .collect()
+    }
+
+    fn is_same_gpu_name(existing_name: &str, candidate_name: &str) -> bool {
+        Self::normalize_gpu_name_for_dedupe(existing_name)
+            == Self::normalize_gpu_name_for_dedupe(candidate_name)
+    }
+
+    fn normalize_gpu_name_for_dedupe(name: &str) -> String {
+        let mut normalized = String::with_capacity(name.len());
+        let mut last_was_separator = true;
+
+        for ch in name.chars().flat_map(char::to_lowercase) {
+            if ch.is_alphanumeric() {
+                normalized.push(ch);
+                last_was_separator = false;
+            } else if !last_was_separator {
+                normalized.push(' ');
+                last_was_separator = true;
+            }
+        }
+
+        normalized.trim().to_string()
+    }
+
+    fn parse_vulkan_device_names(text: &str) -> Vec<String> {
+        let mut names = Vec::new();
+
+        for line in text.lines() {
+            let trimmed = line.trim();
+            if trimmed.is_empty() {
+                continue;
+            }
+
+            if let Some((key, value)) = trimmed.split_once('=') {
+                if key.trim().eq_ignore_ascii_case("deviceName") {
+                    let name = value.trim();
+                    if !name.is_empty() {
+                        names.push(name.to_string());
+                    }
+                    continue;
+                }
+            }
+
+            if let Some(rest) = trimmed.strip_prefix("GPU id") {
+                if let Some(start) = rest.find('(') {
+                    if let Some(end) = rest.rfind(')') {
+                        if end > start + 1 {
+                            let name = rest[start + 1..end].trim();
+                            if !name.is_empty() {
+                                names.push(name.to_string());
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        names
+    }
+
+    fn is_software_vulkan_device(name: &str) -> bool {
+        let lower = name.to_lowercase();
+        lower.contains("llvmpipe")
+            || lower.contains("lavapipe")
+            || lower.contains("swiftshader")
+            || lower.contains("software rasterizer")
+    }
+
     /// Detect Ascend NPUs via npu-smi. Returns a vector of NPU info.
     fn detect_ascend_npus() -> Vec<GpuInfo> {
         // 1. Get the list of IDs
@@ -1157,6 +1292,84 @@ impl SystemSpecs {
             .trim_end_matches('.')
             .parse()
             .ok()
+    }
+
+    fn detect_cpu_name(sys: &System) -> String {
+        if let Some(cpu_name) = sys
+            .cpus()
+            .iter()
+            .map(|cpu| cpu.brand().trim())
+            .find(|brand| !brand.is_empty() && !brand.eq_ignore_ascii_case("unknown"))
+        {
+            return cpu_name.to_string();
+        }
+
+        if let Some(cpu_name) = Self::read_cpu_name_from_proc_cpuinfo() {
+            return cpu_name;
+        }
+
+        if let Some(cpu_name) = Self::read_android_soc_name() {
+            return cpu_name;
+        }
+
+        "Unknown CPU".to_string()
+    }
+
+    fn read_cpu_name_from_proc_cpuinfo() -> Option<String> {
+        #[cfg(target_os = "linux")]
+        {
+            let text = std::fs::read_to_string("/proc/cpuinfo").ok()?;
+            return Self::parse_cpu_name_from_cpuinfo(&text);
+        }
+
+        #[cfg(not(target_os = "linux"))]
+        {
+            None
+        }
+    }
+
+    fn parse_cpu_name_from_cpuinfo(text: &str) -> Option<String> {
+        for key in ["model name", "hardware", "processor", "cpu model", "model"] {
+            for line in text.lines() {
+                let Some((lhs, rhs)) = line.split_once(':') else {
+                    continue;
+                };
+                if lhs.trim().eq_ignore_ascii_case(key) {
+                    let candidate = rhs.trim();
+                    if !candidate.is_empty() && !candidate.eq_ignore_ascii_case("unknown") {
+                        return Some(candidate.to_string());
+                    }
+                }
+            }
+        }
+
+        None
+    }
+
+    fn read_android_soc_name() -> Option<String> {
+        #[cfg(target_os = "linux")]
+        {
+            let output = std::process::Command::new("getprop")
+                .arg("ro.soc.model")
+                .output()
+                .ok()?;
+            if !output.status.success() {
+                return None;
+            }
+
+            let model = String::from_utf8(output.stdout).ok()?;
+            let model = model.trim();
+            if model.is_empty() {
+                return None;
+            }
+
+            return Some(model.to_string());
+        }
+
+        #[cfg(not(target_os = "linux"))]
+        {
+            None
+        }
     }
 
     /// Override the primary GPU's VRAM with a user-specified value (in GB).
@@ -2006,6 +2219,91 @@ mod tests {
         assert_eq!(
             super::gpu_memory_bandwidth_gbps("AMD Instinct MI300X"),
             Some(5300.0)
+        );
+    }
+
+    #[test]
+    fn test_parse_cpu_name_from_cpuinfo_prefers_model_name() {
+        let cpuinfo = "\
+processor   : 0
+model name  : Qualcomm Kryo 680
+Hardware    : Qualcomm Technologies, Inc SM8350
+";
+        assert_eq!(
+            SystemSpecs::parse_cpu_name_from_cpuinfo(cpuinfo),
+            Some("Qualcomm Kryo 680".to_string())
+        );
+    }
+
+    #[test]
+    fn test_parse_cpu_name_from_cpuinfo_uses_hardware_fallback() {
+        let cpuinfo = "\
+processor   : 0
+Hardware    : Qualcomm Technologies, Inc SM8650
+";
+        assert_eq!(
+            SystemSpecs::parse_cpu_name_from_cpuinfo(cpuinfo),
+            Some("Qualcomm Technologies, Inc SM8650".to_string())
+        );
+    }
+
+    #[test]
+    fn test_parse_vulkan_device_names_from_summary_output() {
+        let text = "\
+GPU0:
+deviceName         = Adreno (TM) 740
+GPU1:
+deviceName         = llvmpipe (LLVM 17.0.0, 256 bits)
+";
+        let names = SystemSpecs::parse_vulkan_device_names(text);
+        assert_eq!(
+            names,
+            vec![
+                "Adreno (TM) 740".to_string(),
+                "llvmpipe (LLVM 17.0.0, 256 bits)".to_string()
+            ]
+        );
+    }
+
+    #[test]
+    fn test_parse_vulkan_device_names_from_gpu_id_lines() {
+        let text = "\
+GPU id = 0 (Adreno (TM) 740)
+GPU id = 1 (NVIDIA GeForce RTX 4090)
+";
+        let names = SystemSpecs::parse_vulkan_device_names(text);
+        assert_eq!(
+            names,
+            vec![
+                "Adreno (TM) 740".to_string(),
+                "NVIDIA GeForce RTX 4090".to_string()
+            ]
+        );
+    }
+
+    #[test]
+    fn test_is_software_vulkan_device() {
+        assert!(SystemSpecs::is_software_vulkan_device(
+            "llvmpipe (LLVM 17.0.0, 256 bits)"
+        ));
+        assert!(SystemSpecs::is_software_vulkan_device("SwiftShader Device"));
+        assert!(!SystemSpecs::is_software_vulkan_device("Adreno (TM) 740"));
+    }
+
+    #[test]
+    fn test_is_same_gpu_name_uses_normalized_exact_match() {
+        assert!(SystemSpecs::is_same_gpu_name(
+            "NVIDIA-GeForce RTX 4090",
+            "nvidia geforce rtx 4090"
+        ));
+        assert!(!SystemSpecs::is_same_gpu_name("RTX", "RTX 4090"));
+    }
+
+    #[test]
+    fn test_normalize_gpu_name_for_dedupe() {
+        assert_eq!(
+            SystemSpecs::normalize_gpu_name_for_dedupe(" Adreno (TM) 740 "),
+            "adreno tm 740"
         );
     }
 }

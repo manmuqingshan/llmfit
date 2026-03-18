@@ -214,7 +214,8 @@ TARGET_MODELS = [
     "zai-org/GLM-5",
     # Moonshot Kimi K2.5
     "moonshotai/Kimi-K2.5",
-    # MiniMax M2.5
+    # MiniMax M2.7 / M2.5
+    "MiniMaxAI/MiniMax-M2.7",
     "MiniMaxAI/MiniMax-M2.5",
     # Xiaomi MiMo
     "XiaomiMiMo/MiMo-V2-Flash",
@@ -296,6 +297,7 @@ MOE_ACTIVE_PARAMS = {
     "moonshotai/Kimi-K2-Instruct": 32_000_000_000,
     "moonshotai/Kimi-K2.5": 32_000_000_000,
     "zai-org/GLM-5": 40_000_000_000,
+    "MiniMaxAI/MiniMax-M2.7": 10_000_000_000,
     "MiniMaxAI/MiniMax-M2.5": 10_000_000_000,
     "XiaomiMiMo/MiMo-V2-Flash": 15_000_000_000,
     "nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16": 3_000_000_000,
@@ -1408,6 +1410,18 @@ def main():
             "use_case": "Multimodal, vision and text",
             "pipeline_tag": "image-text-to-text", "architecture": "kimi",
             "hf_downloads": 0, "hf_likes": 0, "release_date": "2026-01-26",
+        },
+        {
+            "name": "MiniMaxAI/MiniMax-M2.7",
+            "provider": "MiniMax", "parameter_count": "230B",
+            "parameters_raw": 230000000000,
+            "min_ram_gb": 128.6, "recommended_ram_gb": 214.4, "min_vram_gb": 117.9,
+            "quantization": "Q4_K_M", "context_length": 131072,
+            "use_case": "Latest flagship with enhanced reasoning and coding",
+            "pipeline_tag": "text-generation", "architecture": "minimax",
+            "is_moe": True, "num_experts": 32, "active_experts": 2,
+            "active_parameters": 10000000000,
+            "hf_downloads": 0, "hf_likes": 0, "release_date": "2026-03-18",
         },
         {
             "name": "MiniMaxAI/MiniMax-M2.5",

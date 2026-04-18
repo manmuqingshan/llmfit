@@ -757,6 +757,14 @@ This is a workaround for recommendation/scoring only; it does not provide true A
 
 Contributions are welcome, especially new models.
 
+### Before submitting a PR
+
+Please run `cargo fmt` before pushing your changes. Most CI check failures are caused by unformatted code:
+
+```sh
+cargo fmt
+```
+
 ### Adding a model
 
 1. Add the model's HuggingFace repo ID (e.g., `meta-llama/Llama-3.1-8B`) to the `TARGET_MODELS` list in `scripts/scrape_hf_models.py`.
